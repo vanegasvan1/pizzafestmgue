@@ -61,7 +61,7 @@ const CATALOG_PIZZERIAS = [
         name: 'Mamma Mia Carbonara',
         pizzeria: 'Antica Pizzeria Romana',
         ingredients: 'Salsa carbonara auténtica con yema de huevo organic, guanciale crujiente, abundante queso pecorino romano y pimienta negra recién molida.',
-        image: 'https://images.unsplash.com/photo-1604382354936-07c5d9983bd3?auto=format&fit=crop&w=600&q=80'
+        image: '/img/pizzamia.jpg'
     }
 ];
 
