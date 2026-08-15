@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+.star-rating i {
+    transition: color 0.15s ease-in-out, transform 0.15s ease-in-out;
+}
+.star-rating i:hover {
+    transform: scale(1.2);
+}
+
+.glass-card {
+    background: rgba(0, 0, 0, 0.85);
+    backdrop-filter: blur(12px);
+}

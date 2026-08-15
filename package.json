@@ -1,0 +1,11 @@
+{
+  "name": "pizza-fest",
+  "version": "1.0.0",
+  "description": "Votaciones",
+  "scripts": {
+    "build": "npx tailwindcss -i ./styles.css -o ./estilos-finales.css --minify"
+  },
+  "dependencies": {
+    "tailwindcss": "^3.4.1"
+  }
+}
