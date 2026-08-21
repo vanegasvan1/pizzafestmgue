@@ -76,51 +76,67 @@ class PizzaFestApp {
         // Variables Admin (el estado real de admin se valida contra la tabla 'admins' en Supabase,
         // protegida por Row Level Security - ver supabase_setup.sql)
         this.isAdmin = false;
-        this.allVotes = [];
+        this.voteStats = []; // totales agregados por pizzería (viene de admin_vote_stats en Supabase)
         this.adminChannel = null;
 
         this.initApp();
     }
 
     async initApp() {
-        const { data: { session } } = await supabase.auth.getSession();
-        this.currentUser = session?.user || null;
-        
-        if (this.currentUser) {
-            await this.loadUserVotes();
-        }
-
-        supabase.auth.onAuthStateChange(async (event, session) => {
+        // Todo dentro de try/catch: si Supabase no responde al cargar la página
+        // (red lenta, servicio caído momentáneamente), igual mostramos el catálogo
+        // en vez de dejar una pantalla en blanco.
+        try {
+            const { data: { session } } = await supabase.auth.getSession();
             this.currentUser = session?.user || null;
+
             if (this.currentUser) {
                 await this.loadUserVotes();
-                await this.updateUIForUser();
-            } else {
-                this.userVotes = {};
-                this.isAdmin = false;
-                await this.updateUIForUser();
             }
-        });
 
-        await this.updateUIForUser();
+            supabase.auth.onAuthStateChange(async (event, session) => {
+                this.currentUser = session?.user || null;
+                if (this.currentUser) {
+                    await this.loadUserVotes();
+                    await this.updateUIForUser();
+                } else {
+                    this.userVotes = {};
+                    this.isAdmin = false;
+                    await this.updateUIForUser();
+                }
+            });
+
+            await this.updateUIForUser();
+        } catch (err) {
+            console.error('Error iniciando la app:', err);
+            this.showToast('Problema de conexión al cargar tu sesión. Los votos ya guardados no se perdieron.', 'warning');
+        }
+
+        // Esto va fuera del try: el catálogo de pizzerías es local (no depende de Supabase)
+        // y debe verse siempre, incluso si todo lo demás falló.
         this.renderPizzeriasCatalog();
     }
 
     async loadUserVotes() {
         if (!this.currentUser) return;
-        const { data, error } = await supabase
-            .from('votes')
-            .select('*')
-            .eq('user_id', this.currentUser.id);
+        try {
+            const { data, error } = await supabase
+                .from('votes')
+                .select('*')
+                .eq('user_id', this.currentUser.id);
 
-        if (!error && data) {
+            if (error) throw error;
+
             this.userVotes = {};
-            data.forEach(v => {
+            (data || []).forEach(v => {
                 this.userVotes[v.pizzeria_id] = { stars: v.stars, timestamp: v.created_at };
             });
             this.updateVoteCountersUI();
             this.renderPizzeriasCatalog();
             this.renderMyVotes();
+        } catch (err) {
+            console.error('Error cargando tus votos:', err);
+            this.showToast('No se pudieron cargar tus votos guardados. Verifica tu conexión.', 'warning');
         }
     }
 
@@ -198,14 +214,20 @@ class PizzaFestApp {
             return;
         }
 
-        const { error } = await supabase
-            .from('votes')
-            .upsert({
-                user_id: this.currentUser.id,
-                pizzeria_id: pizzeriaId,
-                stars: chosenStars,
-                created_at: new Date().toISOString()
-            }, { onConflict: 'user_id,pizzeria_id' });
+        let error;
+        try {
+            ({ error } = await supabase
+                .from('votes')
+                .upsert({
+                    user_id: this.currentUser.id,
+                    pizzeria_id: pizzeriaId,
+                    stars: chosenStars,
+                    created_at: new Date().toISOString()
+                }, { onConflict: 'user_id,pizzeria_id' }));
+        } catch (err) {
+            this.showToast('No se pudo registrar tu voto por un problema de conexión. Intenta de nuevo.', 'error');
+            return;
+        }
 
         if (error) {
             this.showToast('Error al registrar el voto: ' + error.message, 'error');
@@ -466,10 +488,18 @@ class PizzaFestApp {
         
         this.fetchAdminData(); 
 
-        // Escuchar cambios en la tabla 'votes' en tiempo real
+        // Escuchar cambios en la tabla 'votes' en tiempo real.
+        // Con miles de votantes simultáneos, un refresco por CADA voto individual
+        // sería demasiado tráfico. Agrupamos ("debounce") y refrescamos como máximo
+        // una vez cada 3 segundos, sin importar cuántos votos lleguen en ese lapso.
+        let refreshTimer = null;
         this.adminChannel = supabase.channel('admin-votes-channel')
             .on('postgres_changes', { event: '*', schema: 'public', table: 'votes' }, payload => {
-                this.fetchAdminData();
+                if (refreshTimer) return;
+                refreshTimer = setTimeout(() => {
+                    refreshTimer = null;
+                    this.fetchAdminData();
+                }, 3000);
             })
             .subscribe();
     }
@@ -478,12 +508,21 @@ class PizzaFestApp {
         // Validación estricta de seguridad
         if (!this.currentUser || !this.isAdmin) return;
 
-        const { data, error } = await supabase.from('votes').select('*');
-        if (!error && data) {
-            this.allVotes = data;
+        try {
+            // Usamos una función agregada en la base de datos (admin_vote_stats) en vez de
+            // traer TODOS los votos individuales al navegador. Con miles/decenas de miles
+            // de votos, traer cada fila una y otra vez agotaría la cuota de transferencia
+            // de datos de Supabase muy rápido. Esta función solo devuelve un total por
+            // pizzería (8 filas), sin importar cuántos votos existan.
+            const { data, error } = await supabase.rpc('admin_vote_stats');
+            if (error) throw error;
+            this.voteStats = data || [];
             if (this.currentTab === 'admin') {
                 this.renderAdminDashboard();
             }
+        } catch (err) {
+            console.error('Error cargando datos de admin:', err);
+            this.showToast('No se pudieron cargar los datos del panel. Reintenta en unos segundos.', 'warning');
         }
     }
 
@@ -494,18 +533,23 @@ class PizzaFestApp {
         const container = document.getElementById('admin-dashboard-content');
         if (!container) return;
 
-        // Calcular votos, puntajes totales y promedios
+        const statsByPizzeria = {};
+        (this.voteStats || []).forEach(row => {
+            statsByPizzeria[row.pizzeria_id] = row;
+        });
+
+        // Calcular votos, puntajes totales y promedios (ya vienen agregados desde la BD)
         const stats = CATALOG_PIZZERIAS.map(p => {
-            const pVotes = this.allVotes.filter(v => v.pizzeria_id === p.id);
-            const totalVotes = pVotes.length;
-            const totalStars = pVotes.reduce((sum, v) => sum + v.stars, 0);
+            const row = statsByPizzeria[p.id];
+            const totalVotes = row ? Number(row.total_votes) : 0;
+            const totalStars = row ? Number(row.total_stars) : 0;
             // Calculamos el promedio exacto (ej: 4.5)
             const avgStars = totalVotes > 0 ? (totalStars / totalVotes).toFixed(1) : '0.0';
             return { ...p, totalVotes, totalStars, avgStars };
         }).sort((a, b) => b.totalStars - a.totalStars); // El ranking se basa en puntos totales
 
         const maxStars = Math.max(...stats.map(s => s.totalStars), 1);
-        const totalVotesOverall = this.allVotes.length;
+        const totalVotesOverall = stats.reduce((sum, s) => sum + s.totalVotes, 0);
         // Identificamos al líder (siempre que tenga al menos 1 voto)
         const leader = stats[0].totalVotes > 0 ? stats[0] : null;
 
@@ -656,6 +700,15 @@ class PizzaFestApp {
         }, 4000);
     }
 }
+
+// Red de seguridad global: si algo falla en un lugar que no previmos,
+// lo registramos en consola pero NO dejamos que la página se quede en blanco.
+window.addEventListener('error', (e) => {
+    console.error('Error no controlado:', e.error || e.message);
+});
+window.addEventListener('unhandledrejection', (e) => {
+    console.error('Promesa rechazada sin manejar:', e.reason);
+});
 
 window.onload = () => {
     window.app = new PizzaFestApp();
