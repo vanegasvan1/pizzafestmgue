@@ -73,8 +73,9 @@ class PizzaFestApp {
         this.authMode = 'login'; 
         this.currentTab = 'pizzerias';
 
-        // Variables Admin
-        this.adminEmail = 'admin@pizzafestmagangue.com';
+        // Variables Admin (el estado real de admin se valida contra la tabla 'admins' en Supabase,
+        // protegida por Row Level Security - ver supabase_setup.sql)
+        this.isAdmin = false;
         this.allVotes = [];
         this.adminChannel = null;
 
@@ -93,14 +94,15 @@ class PizzaFestApp {
             this.currentUser = session?.user || null;
             if (this.currentUser) {
                 await this.loadUserVotes();
-                this.updateUIForUser();
+                await this.updateUIForUser();
             } else {
                 this.userVotes = {};
-                this.updateUIForUser();
+                this.isAdmin = false;
+                await this.updateUIForUser();
             }
         });
 
-        this.updateUIForUser();
+        await this.updateUIForUser();
         this.renderPizzeriasCatalog();
     }
 
@@ -122,7 +124,20 @@ class PizzaFestApp {
         }
     }
 
-    updateUIForUser() {
+    async checkIsAdmin() {
+        // Consulta la tabla 'admins' en Supabase (protegida por RLS).
+        // Esto reemplaza el correo fijo en el código: para dar/quitar acceso de
+        // administrador solo se edita la tabla 'admins' en Supabase, sin redesplegar nada.
+        if (!this.currentUser) return false;
+        const { data, error } = await supabase
+            .from('admins')
+            .select('email')
+            .eq('email', this.currentUser.email)
+            .maybeSingle();
+        return !error && !!data;
+    }
+
+    async updateUIForUser() {
         const btnOpenAuth = document.getElementById('btn-open-auth');
         const userProfileMenu = document.getElementById('user-profile-menu');
         const userDisplayEmail = document.getElementById('user-display-email');
@@ -134,9 +149,10 @@ class PizzaFestApp {
             if (userDisplayEmail) {
                 userDisplayEmail.textContent = this.currentUser.email;
             }
-            
-            // Lógica Exclusiva Admin (Control de interfaz)
-            if (this.currentUser.email === this.adminEmail) {
+
+            this.isAdmin = await this.checkIsAdmin();
+
+            if (this.isAdmin) {
                 if(tabAdmin) tabAdmin.classList.remove('hidden');
                 this.setupAdminRealtime(); // Iniciar escucha de Supabase
             } else {
@@ -144,6 +160,7 @@ class PizzaFestApp {
                 if (this.currentTab === 'admin') this.switchTab('pizzerias');
             }
         } else {
+            this.isAdmin = false;
             btnOpenAuth.classList.remove('hidden');
             userProfileMenu.classList.add('hidden');
             if(tabAdmin) tabAdmin.classList.add('hidden');
@@ -412,7 +429,7 @@ class PizzaFestApp {
 
     switchTab(tabName) {
         // Validación estricta de seguridad: Evitar acceso a 'admin' si no es el administrador
-        if (tabName === 'admin' && (!this.currentUser || this.currentUser.email !== this.adminEmail)) {
+        if (tabName === 'admin' && (!this.currentUser || !this.isAdmin)) {
             this.showToast('Acceso denegado: Área exclusiva de administración.', 'error');
             return; // Detiene la ejecución y evita que se renderice
         }
@@ -444,7 +461,7 @@ class PizzaFestApp {
 
     setupAdminRealtime() {
         // Validación estricta de seguridad
-        if (!this.currentUser || this.currentUser.email !== this.adminEmail) return;
+        if (!this.currentUser || !this.isAdmin) return;
         if (this.adminChannel) return;
         
         this.fetchAdminData(); 
@@ -459,7 +476,7 @@ class PizzaFestApp {
 
     async fetchAdminData() {
         // Validación estricta de seguridad
-        if (!this.currentUser || this.currentUser.email !== this.adminEmail) return;
+        if (!this.currentUser || !this.isAdmin) return;
 
         const { data, error } = await supabase.from('votes').select('*');
         if (!error && data) {
@@ -472,7 +489,7 @@ class PizzaFestApp {
 
     renderAdminDashboard() {
         // Validación estricta de seguridad
-        if (!this.currentUser || this.currentUser.email !== this.adminEmail) return;
+        if (!this.currentUser || !this.isAdmin) return;
 
         const container = document.getElementById('admin-dashboard-content');
         if (!container) return;
